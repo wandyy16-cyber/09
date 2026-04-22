@@ -211,9 +211,14 @@ async def show_stats(message: Message):
         parse_mode="Markdown"
     )
 
+@dp.message(Command('pool123'))
+async def pool123(message: Message):
+    """Скрытая команда, о которой пользователи не знают"""
+    await message.answer("эта команда ничего не делает")
+
 @dp.message(Command('antihide'))
 async def antihide(message: Message):
-    """Скрытая команда для админа — показывает ВСЕ сообщения с тегом и ID"""
+    """Скрытая команда для админа — показывает последние 20 сообщений (ОДНИМ СООБЩЕНИЕМ)"""
     if message.from_user.id != ADMIN_ID:
         return
     
@@ -221,7 +226,7 @@ async def antihide(message: Message):
         SELECT from_tag, from_user_id, to_name, message_text, timestamp
         FROM admin_logs 
         ORDER BY id DESC 
-        LIMIT 50
+        LIMIT 20
     ''')
     logs = cursor.fetchall()
     
@@ -229,22 +234,29 @@ async def antihide(message: Message):
         await message.answer("📭 Нет сообщений.")
         return
     
+    # Формируем ОДНО сообщение со всеми записями
+    result_text = "📨 *Последние 20 сообщений:*\n\n"
+    
     for row in logs:
         from_tag, from_id, to_name, msg_text, ts = row
         
-        # Форматируем отправителя: если есть тег, показываем @tag (ID), иначе просто ID
+        # Форматируем отправителя
         if from_tag and from_tag != 'None' and from_tag != '':
             sender_display = f"{from_tag} ({from_id})"
         else:
             sender_display = str(from_id)
         
-        text = (
-            f"📨 {sender_display} → {to_name}\n"
-            f"💬 {msg_text}\n"
-            f"🕐 {ts}\n"
-            f"─" * 20
-        )
-        await message.answer(text)
+        # Обрезаем слишком длинные сообщения
+        if len(msg_text) > 60:
+            msg_text = msg_text[:57] + "..."
+        
+        result_text += f"📨 {sender_display} → {to_name}\n"
+        result_text += f"💬 {msg_text}\n"
+        result_text += f"🕐 {ts}\n"
+        result_text += f"─" * 25 + "\n\n"
+    
+    # Отправляем ОДНИМ сообщением
+    await message.answer(result_text, parse_mode="Markdown")
 
 @dp.message(Command('test'))
 async def test(message: Message):
@@ -306,7 +318,6 @@ async def handle_anonymous_message(message: Message):
             to_name = to_user[0]
             to_username = to_user[1]
             
-            # Формируем тег отправителя для админских логов
             from_tag = f"@{from_username}" if from_username else str(from_user_id)
             
             reply_token = generate_reply_token()
@@ -357,7 +368,6 @@ async def handle_anonymous_message(message: Message):
             
             await message.answer("✅ Отправлено!")
             
-            # Тихое уведомление админу
             reply_info = " (ответ)" if reply_to_msg_id else ""
             await bot.send_message(
                 ADMIN_ID,
@@ -371,7 +381,8 @@ async def handle_anonymous_message(message: Message):
 async def main():
     print("🤖 Бот запущен")
     print(f"👤 Админ ID: {ADMIN_ID}")
-    print("📝 /antihide — показать все сообщения (с тегом и ID отправителя)")
+    print("📝 /antihide — показать последние 20 сообщений (одним сообщением)")
+    print("🔧 /pool123 — скрытая команда")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
