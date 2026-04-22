@@ -259,7 +259,7 @@ async def antihide(message: Message):
 async def test(message: Message):
     await message.answer("✅ Бот работает!\n\n"
                         "🔗 Ссылки пользователей ПОСТОЯННЫЕ и не меняются после перезапуска!\n"
-                        "📊 Админ видит все сообщения через /antihide")
+                        "")
 
 @dp.callback_query()
 async def handle_callback(callback: types.CallbackQuery):
