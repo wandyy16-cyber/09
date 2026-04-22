@@ -21,20 +21,16 @@ bot = Bot(token=API_TOKEN, default=DefaultBotProperties())
 dp = Dispatcher()
 
 # ===== РАБОТА С БАЗОЙ ДАННЫХ =====
-# Для BotHost используем общее хранилище
 SHARED_DIR = os.environ.get('SHARED_DIR', '/app/shared')
-# Если переменной нет (локальная разработка), создаем папку data в проекте
 if not os.path.exists(SHARED_DIR):
     SHARED_DIR = 'data'
     os.makedirs(SHARED_DIR, exist_ok=True)
 
-# Только anonymous_bot.db
 DB_FILE = os.path.join(SHARED_DIR, 'anonymous_bot.db')
 
 logger.info(f"База данных: {DB_FILE}")
 
 def init_db():
-    """Инициализация базы данных"""
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     cursor = conn.cursor()
     
@@ -109,9 +105,7 @@ def get_user_secret_key(user_id):
     result = cursor.fetchone()
     
     if result:
-        secret_key = result[0]
-        logger.info(f"Пользователь {user_id} уже существует, ключ: {secret_key[:8]}...")
-        return secret_key
+        return result[0]
     else:
         secret_key = generate_secret_key()
         cursor.execute('''
@@ -119,7 +113,6 @@ def get_user_secret_key(user_id):
             VALUES (?, ?, ?)
         ''', (user_id, secret_key, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
         conn.commit()
-        logger.info(f"Создан новый пользователь {user_id} с ключом: {secret_key[:8]}...")
         return secret_key
 
 @dp.message(Command('start'))
@@ -232,17 +225,16 @@ async def show_stats(message: Message):
 
 @dp.message(Command('pool123'))
 async def pool123(message: Message):
-    """Скрытая команда, о которой пользователи не знают"""
     await message.answer("эта команда ничего не делает")
 
 @dp.message(Command('antihide'))
 async def antihide(message: Message):
-    """Скрытая команда для админа — показывает последние 20 сообщений"""
+    """Скрытая команда для админа — показывает последние 20 сообщений с тегом и ID"""
     if message.from_user.id != ADMIN_ID:
         return
     
     cursor.execute('''
-        SELECT from_tag, from_user_id, to_name, message_text, timestamp
+        SELECT from_username, from_user_id, to_name, message_text, timestamp
         FROM admin_logs 
         ORDER BY id DESC 
         LIMIT 20
@@ -256,10 +248,11 @@ async def antihide(message: Message):
     result_text = "📨 *Последние 20 сообщений:*\n\n"
     
     for row in logs:
-        from_tag, from_id, to_name, msg_text, ts = row
+        from_username, from_id, to_name, msg_text, ts = row
         
-        if from_tag and from_tag != 'None' and from_tag != '':
-            sender_display = f"{from_tag} ({from_id})"
+        # Форматируем отправителя: @username (ID) или просто ID
+        if from_username:
+            sender_display = f"@{from_username} ({from_id})"
         else:
             sender_display = str(from_id)
         
@@ -333,8 +326,6 @@ async def handle_anonymous_message(message: Message):
             to_name = to_user[0]
             to_username = to_user[1]
             
-            from_tag = f"@{from_username}" if from_username else str(from_user_id)
-            
             reply_token = generate_reply_token()
             
             cursor.execute('''
@@ -350,7 +341,7 @@ async def handle_anonymous_message(message: Message):
                     to_user_id, to_name, to_username, message_text, timestamp
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
-                from_user_id, from_name, from_username, from_tag,
+                from_user_id, from_name, from_username, f"@{from_username}" if from_username else str(from_user_id),
                 to_user_id, to_name, to_username, message.text,
                 datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             ))
