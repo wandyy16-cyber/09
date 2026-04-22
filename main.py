@@ -28,22 +28,10 @@ if not os.path.exists(SHARED_DIR):
     SHARED_DIR = 'data'
     os.makedirs(SHARED_DIR, exist_ok=True)
 
-# ПРОВЕРЯЕМ КАКОЙ ФАЙЛ СУЩЕСТВУЕТ
-DB_FILE_CORRECT = os.path.join(SHARED_DIR, 'anonymous_bot.db')
-DB_FILE_TEMP = os.path.join(SHARED_DIR, 'tmpg7x1tb96.db')
+# Только anonymous_bot.db
+DB_FILE = os.path.join(SHARED_DIR, 'anonymous_bot.db')
 
-# Используем тот файл, который существует
-if os.path.exists(DB_FILE_TEMP):
-    DB_FILE = DB_FILE_TEMP
-    logger.info(f"Использую существующую базу данных: {DB_FILE}")
-elif os.path.exists(DB_FILE_CORRECT):
-    DB_FILE = DB_FILE_CORRECT
-    logger.info(f"Использую существующую базу данных: {DB_FILE}")
-else:
-    DB_FILE = DB_FILE_CORRECT
-    logger.info(f"Будет создана новая база данных: {DB_FILE}")
-
-logger.info(f"База данных будет храниться в: {DB_FILE}")
+logger.info(f"База данных: {DB_FILE}")
 
 def init_db():
     """Инициализация базы данных"""
@@ -99,7 +87,7 @@ def init_db():
     
     cursor.execute('SELECT COUNT(*) FROM users')
     user_count = cursor.fetchone()[0]
-    logger.info(f"База данных: {DB_FILE}, пользователей: {user_count}")
+    logger.info(f"Пользователей в базе: {user_count}")
     
     return conn, cursor
 
