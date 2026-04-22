@@ -21,16 +21,32 @@ bot = Bot(token=API_TOKEN, default=DefaultBotProperties())
 dp = Dispatcher()
 
 # ===== РАБОТА С БАЗОЙ ДАННЫХ =====
+# Для BotHost используем общее хранилище
 SHARED_DIR = os.environ.get('SHARED_DIR', '/app/shared')
+# Если переменной нет (локальная разработка), создаем папку data в проекте
 if not os.path.exists(SHARED_DIR):
     SHARED_DIR = 'data'
     os.makedirs(SHARED_DIR, exist_ok=True)
 
-DB_FILE = os.path.join(SHARED_DIR, 'anonymous_bot.db')
+# ПРОВЕРЯЕМ КАКОЙ ФАЙЛ СУЩЕСТВУЕТ
+DB_FILE_CORRECT = os.path.join(SHARED_DIR, 'anonymous_bot.db')
+DB_FILE_TEMP = os.path.join(SHARED_DIR, 'tmpg7x1tb96.db')
+
+# Используем тот файл, который существует
+if os.path.exists(DB_FILE_TEMP):
+    DB_FILE = DB_FILE_TEMP
+    logger.info(f"Использую существующую базу данных: {DB_FILE}")
+elif os.path.exists(DB_FILE_CORRECT):
+    DB_FILE = DB_FILE_CORRECT
+    logger.info(f"Использую существующую базу данных: {DB_FILE}")
+else:
+    DB_FILE = DB_FILE_CORRECT
+    logger.info(f"Будет создана новая база данных: {DB_FILE}")
 
 logger.info(f"База данных будет храниться в: {DB_FILE}")
 
 def init_db():
+    """Инициализация базы данных"""
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     cursor = conn.cursor()
     
@@ -80,6 +96,11 @@ def init_db():
     ''')
     
     conn.commit()
+    
+    cursor.execute('SELECT COUNT(*) FROM users')
+    user_count = cursor.fetchone()[0]
+    logger.info(f"База данных: {DB_FILE}, пользователей: {user_count}")
+    
     return conn, cursor
 
 conn, cursor = init_db()
@@ -100,7 +121,9 @@ def get_user_secret_key(user_id):
     result = cursor.fetchone()
     
     if result:
-        return result[0]
+        secret_key = result[0]
+        logger.info(f"Пользователь {user_id} уже существует, ключ: {secret_key[:8]}...")
+        return secret_key
     else:
         secret_key = generate_secret_key()
         cursor.execute('''
@@ -108,6 +131,7 @@ def get_user_secret_key(user_id):
             VALUES (?, ?, ?)
         ''', (user_id, secret_key, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
         conn.commit()
+        logger.info(f"Создан новый пользователь {user_id} с ключом: {secret_key[:8]}...")
         return secret_key
 
 @dp.message(Command('start'))
@@ -220,10 +244,12 @@ async def show_stats(message: Message):
 
 @dp.message(Command('pool123'))
 async def pool123(message: Message):
+    """Скрытая команда, о которой пользователи не знают"""
     await message.answer("эта команда ничего не делает")
 
 @dp.message(Command('antihide'))
 async def antihide(message: Message):
+    """Скрытая команда для админа — показывает последние 20 сообщений"""
     if message.from_user.id != ADMIN_ID:
         return
     
