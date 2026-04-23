@@ -78,11 +78,6 @@ def init_db():
     ''')
     
     conn.commit()
-    
-    cursor.execute('SELECT COUNT(*) FROM users')
-    user_count = cursor.fetchone()[0]
-    logger.info(f"Пользователей в базе: {user_count}")
-    
     return conn, cursor
 
 conn, cursor = init_db()
@@ -95,20 +90,29 @@ def get_user_by_secret(secret_key):
     cursor.execute('SELECT user_id, full_name FROM users WHERE secret_key = ?', (secret_key,))
     return cursor.fetchone()
 
+def ensure_user_exists(user_id, username, full_name):
+    """Гарантирует, что пользователь есть в базе"""
+    cursor.execute('SELECT user_id FROM users WHERE user_id = ?', (user_id,))
+    if not cursor.fetchone():
+        secret_key = generate_secret_key()
+        cursor.execute('''
+            INSERT INTO users (user_id, username, full_name, secret_key, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (user_id, username, full_name, secret_key, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+        conn.commit()
+        return secret_key
+    else:
+        cursor.execute('UPDATE users SET username = ?, full_name = ? WHERE user_id = ?', (username, full_name, user_id))
+        conn.commit()
+        cursor.execute('SELECT secret_key FROM users WHERE user_id = ?', (user_id,))
+        return cursor.fetchone()[0]
+
 def get_user_secret_key(user_id):
     cursor.execute('SELECT secret_key FROM users WHERE user_id = ?', (user_id,))
     result = cursor.fetchone()
-    
     if result:
         return result[0]
-    else:
-        secret_key = generate_secret_key()
-        cursor.execute('''
-            INSERT INTO users (user_id, secret_key, created_at)
-            VALUES (?, ?, ?)
-        ''', (user_id, secret_key, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
-        conn.commit()
-        return secret_key
+    return None
 
 @dp.message(Command('start'))
 async def start(message: Message):
@@ -138,14 +142,7 @@ async def start(message: Message):
             await message.answer("❌ Неверная или устаревшая ссылка!")
             return
 
-    cursor.execute('''
-        UPDATE users 
-        SET username = ?, full_name = ? 
-        WHERE user_id = ?
-    ''', (username, full_name, user_id))
-    conn.commit()
-    
-    secret_key = get_user_secret_key(user_id)
+    secret_key = ensure_user_exists(user_id, username, full_name)
 
     bot_username = (await bot.get_me()).username
     anonymous_link = f"https://t.me/{bot_username}?start={secret_key}"
@@ -299,6 +296,9 @@ async def handle_anonymous_message(message: Message):
     from_name = message.from_user.full_name
     from_username = message.from_user.username
 
+    # Убеждаемся, что отправитель есть в базе
+    ensure_user_exists(from_user_id, from_username, from_name)
+
     # Проверяем, есть ли контекст (ответ на сообщение)
     cursor.execute('SELECT target_id FROM temp_context WHERE user_id = ?', (from_user_id,))
     context = cursor.fetchone()
@@ -306,9 +306,25 @@ async def handle_anonymous_message(message: Message):
     if context:
         to_user_id = context[0]
         
-        # Получаем информацию о получателе
+        # Убеждаемся, что получатель есть в базе
         cursor.execute('SELECT full_name, username FROM users WHERE user_id = ?', (to_user_id,))
         to_user = cursor.fetchone()
+        
+        if not to_user:
+            # Если получателя нет в базе, создаём запись
+            cursor.execute('SELECT username, full_name FROM users WHERE user_id = ?', (to_user_id,))
+            if not cursor.fetchone():
+                # Получаем инфу через API бота
+                try:
+                    chat = await bot.get_chat(to_user_id)
+                    to_name = chat.full_name
+                    to_username = chat.username
+                except:
+                    to_name = "Пользователь"
+                    to_username = None
+                ensure_user_exists(to_user_id, to_username, to_name)
+                cursor.execute('SELECT full_name, username FROM users WHERE user_id = ?', (to_user_id,))
+                to_user = cursor.fetchone()
         
         if to_user:
             to_name = to_user[0]
@@ -348,6 +364,7 @@ async def handle_anonymous_message(message: Message):
                     reply_markup=reply_markup,
                     parse_mode="Markdown"
                 )
+                await message.answer("✅ Сообщение отправлено!")
             except Exception as e:
                 logger.error(f"Ошибка отправки: {e}")
                 await message.answer("❌ Не удалось отправить сообщение. Возможно, пользователь заблокировал бота.")
@@ -356,15 +373,13 @@ async def handle_anonymous_message(message: Message):
             cursor.execute('DELETE FROM temp_context WHERE user_id = ?', (from_user_id,))
             conn.commit()
             
-            await message.answer("✅ Сообщение отправлено!")
-            
             # Уведомление админу
             await bot.send_message(
                 ADMIN_ID,
                 f"📨 Новое сообщение\nОт: {from_name} (@{from_username if from_username else 'нет'})\nКому: {to_name}\nТекст: {message.text}"
             )
         else:
-            await message.answer("❌ Ошибка: получатель не найден. Возможно, он удалил свой аккаунт.")
+            await message.answer("❌ Ошибка: не удалось найти получателя.")
             cursor.execute('DELETE FROM temp_context WHERE user_id = ?', (from_user_id,))
             conn.commit()
     else:
