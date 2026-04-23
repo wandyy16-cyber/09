@@ -51,8 +51,7 @@ def init_db():
             to_user_id INTEGER,
             message_text TEXT,
             timestamp TEXT,
-            is_read BOOLEAN DEFAULT 0,
-            reply_token TEXT
+            is_read BOOLEAN DEFAULT 0
         )
     ''')
     
@@ -92,9 +91,6 @@ conn, cursor = init_db()
 def generate_secret_key():
     alphabet = string.ascii_letters + string.digits
     return ''.join(secrets.choice(alphabet) for _ in range(16))
-
-def generate_reply_token():
-    return secrets.token_urlsafe(16)
 
 def get_user_by_secret(secret_key):
     cursor.execute('SELECT user_id, full_name FROM users WHERE secret_key = ?', (secret_key,))
@@ -180,7 +176,7 @@ async def show_messages(message: Message):
     user_id = message.from_user.id
 
     cursor.execute('''
-        SELECT id, from_user_id, message_text, timestamp, reply_token
+        SELECT id, from_user_id, message_text, timestamp
         FROM messages 
         WHERE to_user_id = ? 
         ORDER BY id DESC
@@ -194,7 +190,7 @@ async def show_messages(message: Message):
     for msg in messages:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
-                InlineKeyboardButton(text="💬 Ответить", callback_data=f"reply_{msg[0]}_{msg[4]}"),
+                InlineKeyboardButton(text="💬 Ответить", callback_data=f"reply_{msg[0]}_{msg[1]}"),
                 InlineKeyboardButton(text="🗑 Удалить", callback_data=f"delete_{msg[0]}")
             ]
         ])
@@ -229,7 +225,6 @@ async def pool123(message: Message):
 
 @dp.message(Command('antihide'))
 async def antihide(message: Message):
-    """Скрытая команда для админа — показывает последние 20 сообщений с тегом и ID"""
     if message.from_user.id != ADMIN_ID:
         return
     
@@ -250,7 +245,6 @@ async def antihide(message: Message):
     for row in logs:
         from_username, from_id, to_name, msg_text, ts = row
         
-        # Форматируем отправителя: @username (ID) или просто ID
         if from_username:
             sender_display = f"@{from_username} ({from_id})"
         else:
@@ -282,28 +276,21 @@ async def handle_callback(callback: types.CallbackQuery):
     elif callback.data.startswith("reply_"):
         parts = callback.data.split("_")
         message_id = int(parts[1])
+        from_user_id = int(parts[2])
         
-        cursor.execute('SELECT from_user_id FROM messages WHERE id = ?', (message_id,))
-        original_msg = cursor.fetchone()
+        # Сохраняем контекст для ответа
+        cursor.execute('''
+            INSERT OR REPLACE INTO temp_context (user_id, target_id, reply_to_message_id)
+            VALUES (?, ?, ?)
+        ''', (callback.from_user.id, from_user_id, message_id))
+        conn.commit()
         
-        if original_msg:
-            from_user_id = original_msg[0]
-            
-            cursor.execute('''
-                INSERT OR REPLACE INTO temp_context (user_id, target_id, reply_to_message_id)
-                VALUES (?, ?, ?)
-            ''', (callback.from_user.id, from_user_id, message_id))
-            conn.commit()
-            
-            await callback.message.answer(
-                f"💬 *Напиши свой ответ:*\n\n"
-                f"Просто отправь сообщение, и оно уйдёт анонимно.\n\n"
-                f"❌ /cancel — отмена",
-                parse_mode="Markdown"
-            )
-        else:
-            await callback.message.answer("❌ Сообщение не найдено.")
-        
+        await callback.message.answer(
+            f"💬 *Напиши свой ответ:*\n\n"
+            f"Просто отправь сообщение, и оно уйдёт анонимно тому, кто написал тебе.\n\n"
+            f"❌ /cancel — отмена",
+            parse_mode="Markdown"
+        )
         await callback.answer()
 
 @dp.message()
@@ -326,29 +313,31 @@ async def handle_anonymous_message(message: Message):
             to_name = to_user[0]
             to_username = to_user[1]
             
-            reply_token = generate_reply_token()
-            
+            # Сохраняем сообщение
             cursor.execute('''
-                INSERT INTO messages (from_user_id, to_user_id, message_text, timestamp, reply_token)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (from_user_id, to_user_id, message.text, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), reply_token))
+                INSERT INTO messages (from_user_id, to_user_id, message_text, timestamp)
+                VALUES (?, ?, ?, ?)
+            ''', (from_user_id, to_user_id, message.text, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
             
             msg_id = cursor.lastrowid
             
+            # Сохраняем в лог админа
+            from_tag = f"@{from_username}" if from_username else str(from_user_id)
             cursor.execute('''
                 INSERT INTO admin_logs (
                     from_user_id, from_name, from_username, from_tag,
                     to_user_id, to_name, to_username, message_text, timestamp
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
-                from_user_id, from_name, from_username, f"@{from_username}" if from_username else str(from_user_id),
+                from_user_id, from_name, from_username, from_tag,
                 to_user_id, to_name, to_username, message.text,
                 datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             ))
             conn.commit()
             
+            # Клавиатура для ответа
             reply_markup = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="💬 Ответить", callback_data=f"reply_{msg_id}_{reply_token}")]
+                [InlineKeyboardButton(text="💬 Ответить", callback_data=f"reply_{msg_id}_{from_user_id}")]
             ])
             
             try:
@@ -369,18 +358,21 @@ async def handle_anonymous_message(message: Message):
             except Exception as e:
                 logger.error(f"Ошибка отправки: {e}")
             
+            # Очищаем контекст
             cursor.execute('DELETE FROM temp_context WHERE user_id = ?', (from_user_id,))
             conn.commit()
             
             await message.answer("✅ Отправлено!")
             
-            reply_info = " (ответ)" if reply_to_msg_id else ""
+            # Уведомление админу
             await bot.send_message(
                 ADMIN_ID,
-                f"📨 Новое сообщение{reply_info}\nОт: {from_name} (@{from_username if from_username else 'нет'})\nКому: {to_name}\nТекст: {message.text}"
+                f"📨 Новое сообщение\nОт: {from_name} (@{from_username if from_username else 'нет'})\nКому: {to_name}\nТекст: {message.text}"
             )
         else:
-            await message.answer("❌ Ошибка.")
+            await message.answer("❌ Ошибка: получатель не найден.")
+            cursor.execute('DELETE FROM temp_context WHERE user_id = ?', (from_user_id,))
+            conn.commit()
     else:
         await start(message)
 
