@@ -73,8 +73,7 @@ def init_db():
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS temp_context (
             user_id INTEGER PRIMARY KEY,
-            target_id INTEGER,
-            reply_to_message_id INTEGER
+            target_id INTEGER
         )
     ''')
     
@@ -190,7 +189,7 @@ async def show_messages(message: Message):
     for msg in messages:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
-                InlineKeyboardButton(text="💬 Ответить", callback_data=f"reply_{msg[0]}_{msg[1]}"),
+                InlineKeyboardButton(text="💬 Ответить", callback_data=f"reply_{msg[1]}_{msg[0]}"),
                 InlineKeyboardButton(text="🗑 Удалить", callback_data=f"delete_{msg[0]}")
             ]
         ])
@@ -275,14 +274,15 @@ async def handle_callback(callback: types.CallbackQuery):
     
     elif callback.data.startswith("reply_"):
         parts = callback.data.split("_")
-        message_id = int(parts[1])
-        from_user_id = int(parts[2])
+        # Формат: reply_{from_user_id}_{message_id}
+        from_user_id = int(parts[1])
+        message_id = int(parts[2])
         
         # Сохраняем контекст для ответа
         cursor.execute('''
-            INSERT OR REPLACE INTO temp_context (user_id, target_id, reply_to_message_id)
-            VALUES (?, ?, ?)
-        ''', (callback.from_user.id, from_user_id, message_id))
+            INSERT OR REPLACE INTO temp_context (user_id, target_id)
+            VALUES (?, ?)
+        ''', (callback.from_user.id, from_user_id))
         conn.commit()
         
         await callback.message.answer(
@@ -299,13 +299,14 @@ async def handle_anonymous_message(message: Message):
     from_name = message.from_user.full_name
     from_username = message.from_user.username
 
-    cursor.execute('SELECT target_id, reply_to_message_id FROM temp_context WHERE user_id = ?', (from_user_id,))
+    # Проверяем, есть ли контекст (ответ на сообщение)
+    cursor.execute('SELECT target_id FROM temp_context WHERE user_id = ?', (from_user_id,))
     context = cursor.fetchone()
 
     if context:
         to_user_id = context[0]
-        reply_to_msg_id = context[1] if len(context) > 1 else None
         
+        # Получаем информацию о получателе
         cursor.execute('SELECT full_name, username FROM users WHERE user_id = ?', (to_user_id,))
         to_user = cursor.fetchone()
         
@@ -337,32 +338,25 @@ async def handle_anonymous_message(message: Message):
             
             # Клавиатура для ответа
             reply_markup = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="💬 Ответить", callback_data=f"reply_{msg_id}_{from_user_id}")]
+                [InlineKeyboardButton(text="💬 Ответить", callback_data=f"reply_{from_user_id}_{msg_id}")]
             ])
             
             try:
-                if reply_to_msg_id:
-                    await bot.send_message(
-                        to_user_id,
-                        f"📨 *Новый ответ!*\n\n{message.text}",
-                        reply_markup=reply_markup,
-                        parse_mode="Markdown"
-                    )
-                else:
-                    await bot.send_message(
-                        to_user_id,
-                        f"📨 *Новое сообщение!*\n\n{message.text}",
-                        reply_markup=reply_markup,
-                        parse_mode="Markdown"
-                    )
+                await bot.send_message(
+                    to_user_id,
+                    f"📨 *Новое анонимное сообщение!*\n\n{message.text}",
+                    reply_markup=reply_markup,
+                    parse_mode="Markdown"
+                )
             except Exception as e:
                 logger.error(f"Ошибка отправки: {e}")
+                await message.answer("❌ Не удалось отправить сообщение. Возможно, пользователь заблокировал бота.")
             
             # Очищаем контекст
             cursor.execute('DELETE FROM temp_context WHERE user_id = ?', (from_user_id,))
             conn.commit()
             
-            await message.answer("✅ Отправлено!")
+            await message.answer("✅ Сообщение отправлено!")
             
             # Уведомление админу
             await bot.send_message(
@@ -370,10 +364,11 @@ async def handle_anonymous_message(message: Message):
                 f"📨 Новое сообщение\nОт: {from_name} (@{from_username if from_username else 'нет'})\nКому: {to_name}\nТекст: {message.text}"
             )
         else:
-            await message.answer("❌ Ошибка: получатель не найден.")
+            await message.answer("❌ Ошибка: получатель не найден. Возможно, он удалил свой аккаунт.")
             cursor.execute('DELETE FROM temp_context WHERE user_id = ?', (from_user_id,))
             conn.commit()
     else:
+        # Если нет контекста, показываем меню
         await start(message)
 
 async def main():
